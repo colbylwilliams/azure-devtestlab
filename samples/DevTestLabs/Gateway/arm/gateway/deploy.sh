@@ -68,10 +68,16 @@ if (($# == 0)); then
     echo "$helpText" >&2; exit 0
 fi
 
+# check for jq
+[ -x "$(command -v jq)" ] || die "jq command is not installed.\njq is required to run this deploy script. Please install jq from https://stedolan.github.io/jq/download/, then try again."
+# check for the azure cli
+[ -x "$(command -v az)" ] || die "az command is not installed.\nThe Azure CLI is required to run this deploy script. Please install the Azure CLI, run az login, then try again."
+
+
 # defaults
 instances=1
-githubOrg="Azure"
-# sub=$( az account show | jq -r '.id' )
+githubOrg="colbylwilliams"
+sub=$( az account show --query id -o tsv )
 
 # get arg values
 while getopts ":hs:g:l:u:p:c:k:x:t:i:o:" opt; do
@@ -95,11 +101,6 @@ done
 
 
 echo ""
-
-# check for jq
-[ -x "$(command -v jq)" ] || die "jq command is not installed.\njq is required to run this deploy script. Please install jq from https://stedolan.github.io/jq/download/, then try again."
-# check for the azure cli
-[ -x "$(command -v az)" ] || die "az command is not installed.\nThe Azure CLI is required to run this deploy script. Please install the Azure CLI, run az login, then try again."
 
 
 # ensure required args
@@ -139,41 +140,33 @@ sslCertCommonName=$( openssl pkcs12 -in $sslCert -nodes -passin pass:$sslCertPas
 
 
 if [ ! -z "$signCert" ]; then
+
   echo "\nParsing signing certificate\n"
   signCertBase64=$( base64 $signCert )
   signCertThumbprint=$( openssl pkcs12 -in $signCert -nodes -passin pass:$signCertPassword | openssl x509 -noout -fingerprint | cut -d "=" -f 2 | sed 's/://g' )
+
+  echo "\nDeploying arm template to resource group '$rg' in subscription '$sub'"
+  deploy=$( az deployment group create --subscription $sub -g $rg -f "$template" -p adminUsername="$adminUsername" adminPassword="$adminPassword" \
+                      sslCertificate="$sslCertBase64" sslCertificatePassword="$sslCertPassword" sslCertificateThumbprint="$sslCertThumbprint" \
+                      signCertificate="$signCertBase64" signCertificatePassword="$signCertPassword" signCertificateThumbprint="$signCertThumbprint" \
+                      githubUser="$githubOrg" )
+else
+
+  echo "\nDeploying arm template to resource group '$rg' in subscription '$sub'"
+  deploy=$( az deployment group create --subscription $sub -g $rg -f "$template" -p adminUsername="$adminUsername" adminPassword="$adminPassword" \
+                      sslCertificate="$sslCertBase64" sslCertificatePassword="$sslCertPassword" sslCertificateThumbprint="$sslCertThumbprint" \
+                      githubUser="$githubOrg" )
 fi
-
-
-echo "\nDeploying arm template"
-deploy=$(az deployment group create --subscription $sub -g $rg \
-         --template-file $template \
-         --parameters adminUsername="$adminUsername" \
-                      adminPassword="$adminPassword" \
-                      sslCertificate="$sslCertBase64" \
-                      sslCertificatePassword="$sslCertPassword" \
-                      sslCertificateThumbprint="$sslCertThumbprint" \
-                      signCertificate=$signCertBase64 \
-                      signCertificatePassword=$signCertPassword \
-                      signCertificateThumbprint=$signCertThumbprint \
-                      githubUser=$githubOrg | jq '.properties.outputs' )
 
 
 [ ! -z "$deploy" ] || die "Failed to deploy arm template."
 
-
-echo "\nGetting script runner managed identity"
-identity=$( az identity show --subscription $sub -g $rg -n createSignCertificateIdentity --query principalId -o tsv )
-
-echo "Deleting script runner managed identity role assignments"
-az role assignment delete --subscription $sub -g $rg --assignee $identity
-
-echo "Deleting script runner managed identity"
-az identity delete --subscription $sub -g $rg -n createSignCertificateIdentity
+outputs=$( echo $deploy | jq '.properties.outputs' )
 
 
 if [ -d "$artifactsSource" ]; then
-  artifacts=$( echo $deploy | jq '.artifactsStorage.value' )
+
+  artifacts=$( echo $outputs | jq '.artifactsStorage.value' )
   artifactsAccount=$( echo $artifacts | jq -r '.account' )
   artifactsContainer=$( echo $artifacts | jq -r '.container' )
 
@@ -182,22 +175,23 @@ if [ -d "$artifactsSource" ]; then
 fi
 
 
-gateway=$( echo $deploy | jq '.gateway.value' )
+gateway=$( echo $outputs | jq '.gateway.value' )
 gatewayIP=$( echo $gateway | jq -r '.ip' )
 gatewayFQDN=$( echo $gateway | jq -r '.fqdn' )
 gatewayScaleSet=$( echo $gateway | jq -r '.scaleSet' )
 gatewayFunction=$( echo $gateway | jq -r '.function' )
+
 
 echo "\nScaling gateway to $instances instances"
 az vmss scale --subscription $sub -g $rg -n $gatewayScaleSet --new-capacity $instances > /dev/null 2>&1 &
 
 if [ "$gatewayFunction" != "null" ]; then
   echo "\nGetting gateway token"
-  gatewayToken=$(az functionapp function keys list --subscription $sub -g $rg -n $gatewayFunction --function-name CreateToken | jq -r '.gateway' )
+  gatewayToken=$( az functionapp function keys list --subscription $sub -g $rg -n $gatewayFunction --function-name CreateToken | jq -r '.gateway' )
 
   if [ "$gatewayToken" == "null" ]; then
     echo "No gateway token found, creating"
-    gatewayToken=$(az functionapp function keys set --subscription $sub -g $rg -n $gatewayFunction --function-name CreateToken --key-name gateway --query value -o tsv )
+    gatewayToken=$( az functionapp function keys set --subscription $sub -g $rg -n $gatewayFunction --function-name CreateToken --key-name gateway --query value -o tsv )
   fi
 fi
 
