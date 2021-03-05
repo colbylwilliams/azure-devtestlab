@@ -125,4 +125,7 @@ echo "{ \"thumbprint\": \"$thumbprint\", \"password\": \"$password\", \"base64\"
 echo "Cleaning up temporary files"
 rm -rf "$tdir"
 
+echo "Deleting script runner managed identity"
+az identity delete --ids "$AZ_SCRIPTS_USER_ASSIGNED_IDENTITY"
+
 echo "Done."
