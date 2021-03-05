@@ -1,1 +1,4 @@
-artifacts/RDGatewayFedAuth.msi
+
+*.pfx
+*.p12
+*.msi
